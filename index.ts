@@ -7,6 +7,14 @@ import { createInterface } from 'readline';
 const routes = process.env.PATH?.split(path.delimiter) ?? [];
 
 // Commands Enum
+
+type TokenType = 'WORD' | 'PIPE' | 'REDIRECT' | 'QUOTED_STRING';
+
+interface Token {
+	type: TokenType;
+	value: string;
+}
+
 enum CommandsEnum {
 	ECHO = 'echo',
 	TYPE = 'type',
@@ -37,45 +45,89 @@ function isDoubleQuoteAscii(character: string) {
 	return code === 34;
 }
 
-function splitCommandLine(line: string): string[] {
-	let args: string[] = [];
-	let current = '';
-	let inSingleQuotes = false;
-	let inDoubleQuotes = false;
+function isBackslash(character: string) {
+	const code = character.charCodeAt(0);
+	return code === 92;
+}
 
+enum CaracterStateEnum {
+	NORMAL = 'NORMAL',
+	INSIDE_SINGLE_QUOTE = 'INSIDE_SINGLE_QUOTE',
+	INSIDE_DOUBLE_QUOTE = 'INSIDE_DOUBLE_QUOTE',
+	BACKSLASH_OUTSIDE_QUOTES = 'BACKSLASH_OUTSIDE_QUOTES',
+}
+function splitCommandLine(line: string): Token[] {
+	let tokens: Token[] = [];
+
+	// Store the final parsed arguments
+	let args: string[] = [];
+	// Accumulates characters for the current argument
+	let current = '';
+
+	let state: CaracterStateEnum = CaracterStateEnum.NORMAL;
 	for (let i = 0; i < line.length; i++) {
 		const c = line[i];
 
-		if (isSingleQuoteAscii(c) || isDoubleQuoteAscii(c)) {
-			const prev = line[i - 1];
-			const next = line[i + 1];
-
-			const isSurroundedByLetters =
-				prev && isLetterAscii(prev) && next && isLetterAscii(next);
-
-			if (!(isSingleQuoteAscii(c) && isSurroundedByLetters)) {
-				inSingleQuotes = !inSingleQuotes;
-				inDoubleQuotes = !inDoubleQuotes;
+		if (state == CaracterStateEnum.NORMAL) {
+			// Change state to Single Quote
+			if (isSingleQuoteAscii(c)) {
+				state = CaracterStateEnum.INSIDE_SINGLE_QUOTE;
 				continue;
 			}
+
+			if (isDoubleQuoteAscii(c)) {
+				state = CaracterStateEnum.INSIDE_DOUBLE_QUOTE;
+				continue;
+			}
+
+			if (isBackslash(c)) {
+				state = CaracterStateEnum.BACKSLASH_OUTSIDE_QUOTES;
+				continue;
+			}
+
+			if (c === ' ') {
+				if (current.length > 0) {
+					tokens.push({ type: 'WORD', value: current });
+					current = '';
+				}
+				continue;
+			}
+
+			current += c;
 		}
 
-		if ((!inSingleQuotes || !inDoubleQuotes) && c === ' ') {
-			if (current.length > 0) {
-				args.push(current);
-				current = '';
+		if (state == CaracterStateEnum.INSIDE_SINGLE_QUOTE) {
+			// Identify that is closing single quote so change state
+			if (isSingleQuoteAscii(c)) {
+				state = CaracterStateEnum.NORMAL;
+				continue;
 			}
+			current += c;
+		}
+
+		if (state == CaracterStateEnum.INSIDE_DOUBLE_QUOTE) {
+			// Identify that is closing single quote so change state
+			if (isDoubleQuoteAscii(c)) {
+				state = CaracterStateEnum.NORMAL;
+				continue;
+			}
+			current += c;
+		}
+
+		if (state == CaracterStateEnum.BACKSLASH_OUTSIDE_QUOTES) {
+			state = CaracterStateEnum.NORMAL;
+			current += c;
 			continue;
 		}
-
-		current += c;
 	}
 
-	if (current.length > 0) args.push(current);
+	if (current.length > 0) {
+		args.push(current);
+		tokens.push({ type: 'WORD', value: current });
+	}
 
-	return args;
+	return tokens;
 }
-
 // Commands callbacks actions
 function notFoundCommand(command: string) {
 	console.log(`${command}: not found`);
@@ -175,12 +227,12 @@ function ask(): void {
 		const splittedCommands = splitCommandLine(command);
 		// Checking first command to know if is a built-in command
 		const firstCommand = splittedCommands[0];
-		const restCommand = splittedCommands.slice(1);
-		if (commands.has(firstCommand)) {
+		const restCommand = splittedCommands.slice(1).map((item) => item.value);
+		if (commands.has(firstCommand.value)) {
 			// Built in
-			switch (firstCommand) {
+			switch (firstCommand.value) {
 				case CommandsEnum.ECHO:
-					handleEchoCommand(splittedCommands.slice(1));
+					handleEchoCommand(restCommand);
 					break;
 				case CommandsEnum.TYPE:
 					commands.has(restCommand.join().trim())
@@ -191,7 +243,7 @@ function ask(): void {
 					console.log(currentWorkspaceDirectory);
 					break;
 				case CommandsEnum.CD:
-					handleCDCommand(restCommand[0]);
+					handleCDCommand(restCommand.join(' '));
 					break;
 				case CommandsEnum.EXIT:
 					rl.close();
@@ -201,9 +253,10 @@ function ask(): void {
 			ask();
 			return;
 		}
-		const executablePath = findExecutableInPath(firstCommand);
+
+		const executablePath = findExecutableInPath(firstCommand.value);
 		if (executablePath) {
-			const child = spawn(firstCommand, restCommand, {
+			const child = spawn(firstCommand.value, restCommand, {
 				stdio: 'inherit',
 			});
 			child.on('close', () => {
@@ -213,10 +266,11 @@ function ask(): void {
 		}
 
 		// Not found
-		notFoundCommand(firstCommand);
+		notFoundCommand(firstCommand.value);
 
 		// Ask again
 		ask();
 	});
 }
+
 ask();
