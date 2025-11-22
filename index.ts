@@ -29,25 +29,45 @@ const rl = createInterface({
 	output: process.stdout,
 });
 
-// Helper functions
-function isLetterAscii(character: string) {
-	const code = character.charCodeAt(0);
-	return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+// - Character ASCII constants - //
+export const CHAR_CODES = {
+	SINGLE_QUOTE: 39, // '
+	DOUBLE_QUOTE: 34, // "
+	BACKSLASH: 92, // \
+	DOLLAR: 36, // $
+	BACKTICK: 96, // `
+	GREATHER_THAN: 62, // >
+	UPPERCASE_A_Z: { MIN: 65, MAX: 90 },
+	LOWERCASE_A_Z: { MIN: 97, MAX: 122 },
+} as const;
+
+// - Generic checker - //
+export function isAsciiChar(character: string, asciiCode: number): boolean {
+	return character.charCodeAt(0) === asciiCode;
+}
+export function isAsciiInRange(
+	code: number,
+	range: { MIN: number; MAX: number }
+): boolean {
+	return code >= range.MIN && code <= range.MAX;
 }
 
-function isSingleQuoteAscii(character: string) {
-	const code = character.charCodeAt(0);
-	return code === 39;
-}
+// - Specific helpers - //
+export const isSingleQuote = (c: string) =>
+	isAsciiChar(c, CHAR_CODES.SINGLE_QUOTE);
 
-function isDoubleQuoteAscii(character: string) {
-	const code = character.charCodeAt(0);
-	return code === 34;
-}
+export const isDoubleQuote = (c: string) =>
+	isAsciiChar(c, CHAR_CODES.DOUBLE_QUOTE);
 
-function isBackslash(character: string) {
+export const isBackslash = (c: string) => isAsciiChar(c, CHAR_CODES.BACKSLASH);
+
+export function isLetterAscii(character: string): boolean {
 	const code = character.charCodeAt(0);
-	return code === 92;
+
+	return (
+		isAsciiInRange(code, CHAR_CODES.UPPERCASE_A_Z) ||
+		isAsciiInRange(code, CHAR_CODES.LOWERCASE_A_Z)
+	);
 }
 
 enum CaracterStateEnum {
@@ -55,33 +75,44 @@ enum CaracterStateEnum {
 	INSIDE_SINGLE_QUOTE = 'INSIDE_SINGLE_QUOTE',
 	INSIDE_DOUBLE_QUOTE = 'INSIDE_DOUBLE_QUOTE',
 	BACKSLASH_OUTSIDE_QUOTES = 'BACKSLASH_OUTSIDE_QUOTES',
+	BACKSLASH_INSIDE_QUOTES = 'BACKSLASH_INSIDE_QUOTES',
+	REDIRECT = 'REDIRECT',
 }
-function splitCommandLine(line: string): Token[] {
-	let tokens: Token[] = [];
 
-	// Store the final parsed arguments
-	let args: string[] = [];
+function splitCommandLine(line: string): Token[] {
+	// Tokenize the information of the command to know which structure do we have
+	let tokens: Token[] = [];
 	// Accumulates characters for the current argument
 	let current = '';
 
 	let state: CaracterStateEnum = CaracterStateEnum.NORMAL;
 	for (let i = 0; i < line.length; i++) {
+		const next = line[i + 1];
 		const c = line[i];
 
+		// Normal case
 		if (state == CaracterStateEnum.NORMAL) {
-			// Change state to Single Quote
-			if (isSingleQuoteAscii(c)) {
+			// Is single quote
+			if (isAsciiChar(c, CHAR_CODES.SINGLE_QUOTE)) {
 				state = CaracterStateEnum.INSIDE_SINGLE_QUOTE;
 				continue;
 			}
 
-			if (isDoubleQuoteAscii(c)) {
+			// Is double quote
+			if (isAsciiChar(c, CHAR_CODES.DOUBLE_QUOTE)) {
 				state = CaracterStateEnum.INSIDE_DOUBLE_QUOTE;
 				continue;
 			}
 
-			if (isBackslash(c)) {
+			// Is Backslash
+			if (isAsciiChar(c, CHAR_CODES.BACKSLASH)) {
 				state = CaracterStateEnum.BACKSLASH_OUTSIDE_QUOTES;
+				continue;
+			}
+
+			// Is Greather than
+			if (isAsciiChar(c, CHAR_CODES.GREATHER_THAN)) {
+				tokens.push({ type: 'REDIRECT', value: c });
 				continue;
 			}
 
@@ -96,38 +127,60 @@ function splitCommandLine(line: string): Token[] {
 			current += c;
 		}
 
+		// Inside Single Quote
 		if (state == CaracterStateEnum.INSIDE_SINGLE_QUOTE) {
 			// Identify that is closing single quote so change state
-			if (isSingleQuoteAscii(c)) {
+			if (isSingleQuote(c)) {
 				state = CaracterStateEnum.NORMAL;
 				continue;
 			}
+
 			current += c;
 		}
 
+		// Inside Double Quote
 		if (state == CaracterStateEnum.INSIDE_DOUBLE_QUOTE) {
 			// Identify that is closing single quote so change state
-			if (isDoubleQuoteAscii(c)) {
+			if (isDoubleQuote(c)) {
 				state = CaracterStateEnum.NORMAL;
+				continue;
+			}
+
+			if (
+				isBackslash(c) &&
+				(isAsciiChar(next, CHAR_CODES.DOUBLE_QUOTE) ||
+					isAsciiChar(next, CHAR_CODES.DOLLAR) ||
+					isAsciiChar(next, CHAR_CODES.BACKSLASH) ||
+					isAsciiChar(next, CHAR_CODES.BACKTICK))
+			) {
+				state = CaracterStateEnum.BACKSLASH_INSIDE_QUOTES;
 				continue;
 			}
 			current += c;
 		}
 
+		// Backslash outside quotes
 		if (state == CaracterStateEnum.BACKSLASH_OUTSIDE_QUOTES) {
 			state = CaracterStateEnum.NORMAL;
+			current += c;
+			continue;
+		}
+
+		// Backslash inside quotes
+		if (state == CaracterStateEnum.BACKSLASH_INSIDE_QUOTES) {
+			state = CaracterStateEnum.INSIDE_DOUBLE_QUOTE;
 			current += c;
 			continue;
 		}
 	}
 
 	if (current.length > 0) {
-		args.push(current);
 		tokens.push({ type: 'WORD', value: current });
 	}
 
 	return tokens;
 }
+
 // Commands callbacks actions
 function notFoundCommand(command: string) {
 	console.log(`${command}: not found`);
@@ -156,6 +209,7 @@ function findExecutableInPath(command: string): string | null {
 			}
 		}
 	}
+
 	return null;
 }
 
@@ -225,11 +279,11 @@ function ask(): void {
 		}
 
 		const splittedCommands = splitCommandLine(command);
-		// Checking first command to know if is a built-in command
 		const firstCommand = splittedCommands[0];
 		const restCommand = splittedCommands.slice(1).map((item) => item.value);
+
+		// Built in Commands
 		if (commands.has(firstCommand.value)) {
-			// Built in
 			switch (firstCommand.value) {
 				case CommandsEnum.ECHO:
 					handleEchoCommand(restCommand);
