@@ -8,7 +8,7 @@ const routes = process.env.PATH?.split(path.delimiter) ?? [];
 
 // Commands Enum
 
-type TokenType = 'WORD' | 'PIPE' | 'REDIRECT' | 'QUOTED_STRING';
+type TokenType = 'WORD' | 'PIPE' | 'REDIRECT' | 'QUOTED_STRING' | 'PATH';
 
 interface Token {
 	type: TokenType;
@@ -39,6 +39,7 @@ export const CHAR_CODES = {
 	GREATHER_THAN: 62, // >
 	UPPERCASE_A_Z: { MIN: 65, MAX: 90 },
 	LOWERCASE_A_Z: { MIN: 97, MAX: 122 },
+	DIGIT_0_9: { MIN: 48, MAX: 57 },
 } as const;
 
 // - Generic checker - //
@@ -68,6 +69,11 @@ export function isLetterAscii(character: string): boolean {
 		isAsciiInRange(code, CHAR_CODES.UPPERCASE_A_Z) ||
 		isAsciiInRange(code, CHAR_CODES.LOWERCASE_A_Z)
 	);
+}
+
+export function isLDigitAscii(character: string): boolean {
+	const code = character.charCodeAt(0);
+	return isAsciiInRange(code, CHAR_CODES.DIGIT_0_9);
 }
 
 enum CaracterStateEnum {
@@ -116,9 +122,22 @@ function splitCommandLine(line: string): Token[] {
 				continue;
 			}
 
+			if (
+				isLDigitAscii(c) &&
+				next &&
+				isAsciiChar(next, CHAR_CODES.GREATHER_THAN)
+			) {
+				tokens.push({ type: 'REDIRECT', value: c + next });
+				i++;
+				continue;
+			}
+
 			if (c === ' ') {
 				if (current.length > 0) {
-					tokens.push({ type: 'WORD', value: current });
+					tokens.push({
+						type: 'WORD',
+						value: current,
+					});
 					current = '';
 				}
 				continue;
@@ -175,7 +194,10 @@ function splitCommandLine(line: string): Token[] {
 	}
 
 	if (current.length > 0) {
-		tokens.push({ type: 'WORD', value: current });
+		tokens.push({
+			type: 'WORD',
+			value: current,
+		});
 	}
 
 	return tokens;
@@ -281,9 +303,15 @@ function ask(): void {
 		const splittedCommands = splitCommandLine(command);
 		const firstCommand = splittedCommands[0];
 		const restCommand = splittedCommands.slice(1).map((item) => item.value);
+		const redirectToken = splittedCommands.filter(
+			(item) => item.type === 'REDIRECT'
+		);
+		const includeRedirect = redirectToken
+			.map((item) => item.type)
+			.includes('REDIRECT');
 
 		// Built in Commands
-		if (commands.has(firstCommand.value)) {
+		if (commands.has(firstCommand.value) && !includeRedirect) {
 			switch (firstCommand.value) {
 				case CommandsEnum.ECHO:
 					handleEchoCommand(restCommand);
@@ -305,6 +333,41 @@ function ask(): void {
 			}
 
 			ask();
+			return;
+		}
+
+		// If is redirect
+		if (includeRedirect) {
+			const outputPath = restCommand[restCommand.length - 1];
+			const outputDir = path.dirname(outputPath);
+			const redirectStderr = redirectToken[0].value === '2>';
+			const args = restCommand.slice(
+				0,
+				restCommand.findIndex(
+					(t) => t === '>' || t === '1>' || t === '2>'
+				)
+			);
+
+			fs.mkdirSync(outputDir, { recursive: true });
+			const outputStream = fs.createWriteStream(outputPath);
+
+			if (redirectStderr) {
+				const firstChild = spawn(firstCommand.value, args, {
+					stdio: ['inherit', 'inherit', 'pipe'],
+				});
+				firstChild.stderr.pipe(outputStream);
+			}
+
+			if (!redirectStderr) {
+				const firstChild = spawn(firstCommand.value, args, {
+					stdio: ['inherit', 'pipe', 'inherit'],
+				});
+				firstChild.stdout.pipe(outputStream);
+			}
+
+			outputStream.on('finish', () => {
+				ask();
+			});
 			return;
 		}
 
