@@ -1,5 +1,5 @@
 import assert from 'assert';
-import { spawn } from 'child_process';
+import { spawn, type StdioOptions } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { createInterface } from 'readline';
@@ -29,52 +29,15 @@ const rl = createInterface({
 	output: process.stdout,
 });
 
-// - Character ASCII constants - //
-export const CHAR_CODES = {
-	SINGLE_QUOTE: 39, // '
-	DOUBLE_QUOTE: 34, // "
-	BACKSLASH: 92, // \
-	DOLLAR: 36, // $
-	BACKTICK: 96, // `
-	GREATHER_THAN: 62, // >
-	UPPERCASE_A_Z: { MIN: 65, MAX: 90 },
-	LOWERCASE_A_Z: { MIN: 97, MAX: 122 },
-	DIGIT_0_9: { MIN: 48, MAX: 57 },
-} as const;
-
-// - Generic checker - //
-export function isAsciiChar(character: string, asciiCode: number): boolean {
-	return character.charCodeAt(0) === asciiCode;
-}
-export function isAsciiInRange(
-	code: number,
-	range: { MIN: number; MAX: number }
-): boolean {
-	return code >= range.MIN && code <= range.MAX;
-}
 
 // - Specific helpers - //
-export const isSingleQuote = (c: string) =>
-	isAsciiChar(c, CHAR_CODES.SINGLE_QUOTE);
-
-export const isDoubleQuote = (c: string) =>
-	isAsciiChar(c, CHAR_CODES.DOUBLE_QUOTE);
-
-export const isBackslash = (c: string) => isAsciiChar(c, CHAR_CODES.BACKSLASH);
-
-export function isLetterAscii(character: string): boolean {
-	const code = character.charCodeAt(0);
-
-	return (
-		isAsciiInRange(code, CHAR_CODES.UPPERCASE_A_Z) ||
-		isAsciiInRange(code, CHAR_CODES.LOWERCASE_A_Z)
-	);
-}
-
-export function isLDigitAscii(character: string): boolean {
-	const code = character.charCodeAt(0);
-	return isAsciiInRange(code, CHAR_CODES.DIGIT_0_9);
-}
+const ESCAPABLE_IN_DOUBLE_QUOTES = ['"', '$', '\\', '`'];
+export const isSingleQuote = (c: string) => c === "'";
+export const isDoubleQuote = (c: string) => c === '"';
+export const isBackslash = (c: string) => c === '\\';
+export const isAppend = (c: string) => c === '1>>' || c === '2>>' || c === '>>';
+export const isRedirect = (c: string) => c === '1>' || c === '2>' || c === '>';
+export const isEscapableInDoubleQuote = (c: string) => ESCAPABLE_IN_DOUBLE_QUOTES.includes(c);
 
 enum CaracterStateEnum {
 	NORMAL = 'NORMAL',
@@ -93,45 +56,54 @@ function splitCommandLine(line: string): Token[] {
 
 	let state: CaracterStateEnum = CaracterStateEnum.NORMAL;
 	for (let i = 0; i < line.length; i++) {
-		const next = line[i + 1];
 		const c = line[i];
+		const next = line[i + 1];
+        const nextForward = line[i + 2];
+        const twoChars = c + next;
+        const threeChar = c + next + nextForward;
 
 		// Normal case
 		if (state == CaracterStateEnum.NORMAL) {
 			// Is single quote
-			if (isAsciiChar(c, CHAR_CODES.SINGLE_QUOTE)) {
+			if (isSingleQuote(c)) {
 				state = CaracterStateEnum.INSIDE_SINGLE_QUOTE;
 				continue;
 			}
 
 			// Is double quote
-			if (isAsciiChar(c, CHAR_CODES.DOUBLE_QUOTE)) {
+			if (isDoubleQuote(c)) {
 				state = CaracterStateEnum.INSIDE_DOUBLE_QUOTE;
 				continue;
 			}
 
-			// Is Backslash
-			if (isAsciiChar(c, CHAR_CODES.BACKSLASH)) {
+			// Is Backslash \
+			if (isBackslash(c)) {
 				state = CaracterStateEnum.BACKSLASH_OUTSIDE_QUOTES;
 				continue;
 			}
 
-			// Is Greather than
-			if (isAsciiChar(c, CHAR_CODES.GREATHER_THAN)) {
+            /** We verify always the longest pattern before the sortes because we process character to character */
+
+            // Is Number with double Greather than 1>> | 2>> (append)
+            if (isAppend(threeChar)) {
+				tokens.push({ type: 'REDIRECT', value: threeChar});
+				i += 2
+				continue;
+			}
+            
+            // Is double Greather than >> 
+			if (isAppend(twoChars) || isRedirect(twoChars)) {
+				tokens.push({ type: 'REDIRECT', value: twoChars });
+                i++
+				continue;
+			}
+           
+			// Is Greather than >
+			if (isRedirect(c)) {
 				tokens.push({ type: 'REDIRECT', value: c });
 				continue;
-			}
-
-			if (
-				isLDigitAscii(c) &&
-				next &&
-				isAsciiChar(next, CHAR_CODES.GREATHER_THAN)
-			) {
-				tokens.push({ type: 'REDIRECT', value: c + next });
-				i++;
-				continue;
-			}
-
+			}  
+			
 			if (c === ' ') {
 				if (current.length > 0) {
 					tokens.push({
@@ -165,13 +137,8 @@ function splitCommandLine(line: string): Token[] {
 				continue;
 			}
 
-			if (
-				isBackslash(c) &&
-				(isAsciiChar(next, CHAR_CODES.DOUBLE_QUOTE) ||
-					isAsciiChar(next, CHAR_CODES.DOLLAR) ||
-					isAsciiChar(next, CHAR_CODES.BACKSLASH) ||
-					isAsciiChar(next, CHAR_CODES.BACKTICK))
-			) {
+            // If current char is backslash and next char can be escaped inside double quotes
+			if (isBackslash(c) && isEscapableInDoubleQuote(next)) {
 				state = CaracterStateEnum.BACKSLASH_INSIDE_QUOTES;
 				continue;
 			}
@@ -337,39 +304,49 @@ function ask(): void {
 		}
 
 		// If is redirect
-		if (includeRedirect) {
-			const outputPath = restCommand[restCommand.length - 1];
-			const outputDir = path.dirname(outputPath);
-			const redirectStderr = redirectToken[0].value === '2>';
-			const args = restCommand.slice(
-				0,
-				restCommand.findIndex(
-					(t) => t === '>' || t === '1>' || t === '2>'
-				)
-			);
-
-			fs.mkdirSync(outputDir, { recursive: true });
-			const outputStream = fs.createWriteStream(outputPath);
-
-			if (redirectStderr) {
-				const firstChild = spawn(firstCommand.value, args, {
-					stdio: ['inherit', 'inherit', 'pipe'],
-				});
-				firstChild.stderr.pipe(outputStream);
-			}
-
-			if (!redirectStderr) {
-				const firstChild = spawn(firstCommand.value, args, {
-					stdio: ['inherit', 'pipe', 'inherit'],
-				});
-				firstChild.stdout.pipe(outputStream);
-			}
-
-			outputStream.on('finish', () => {
-				ask();
-			});
-			return;
-		}
+        if (includeRedirect) {
+            // Parse redirection type and destination
+            const redirectOp = redirectToken[0].value;
+            const outputPath = restCommand[restCommand.length - 1];
+            
+            // Determine redirection behavior
+            const isStderrRedirect = redirectOp === '2>' || redirectOp === '2>>';
+            const isAppendMode = redirectOp.includes('>>');
+            
+            // Extract command arguments (everything before redirect operator)
+            const redirectIndex = restCommand.findIndex(t => 
+                ['>', '1>', '2>', '>>', '1>>', '2>>'].includes(t)
+            );
+            const args = restCommand.slice(0, redirectIndex);
+            
+            // Setup output file
+            const outputDir = path.dirname(outputPath);
+            fs.mkdirSync(outputDir, { recursive: true });
+            const outputStream = fs.createWriteStream(
+                outputPath, 
+                isAppendMode ? { flags: 'a' } : undefined
+            );
+            
+            // Spawn with appropriate stdio configuration
+            const stdioConfig: StdioOptions = isStderrRedirect 
+                ? ['inherit', 'inherit', 'pipe']  // Pipe stderr
+                : ['inherit', 'pipe', 'inherit']; // Pipe stdout
+            
+            const child = spawn(firstCommand.value, args, { stdio: stdioConfig });
+            
+            // Pipe the appropriate stream to output file
+            if (isStderrRedirect) {
+                child.stderr?.pipe(outputStream);
+            } else {
+                child.stdout?.pipe(outputStream);
+            }
+            
+            outputStream.on('finish', () => {
+                ask();
+            });
+            
+            return;
+}
 
 		const executablePath = findExecutableInPath(firstCommand.value);
 		if (executablePath) {
