@@ -7,6 +7,20 @@ import { createInterface } from 'readline';
 const routes = process.env.PATH?.split(path.delimiter) ?? [];
 
 // Commands Enum
+enum CommandsEnum {
+    ECHO = 'echo',
+    TYPE = 'type',
+    PWD = 'pwd',
+    CD = 'cd',
+    EXIT = 'exit',
+}
+
+const commands = new Set<string>();
+commands.add(CommandsEnum.ECHO);
+commands.add(CommandsEnum.TYPE);
+commands.add(CommandsEnum.PWD);
+commands.add(CommandsEnum.CD);
+commands.add(CommandsEnum.EXIT);
 
 type TokenType = 'WORD' | 'PIPE' | 'REDIRECT' | 'QUOTED_STRING' | 'PATH';
 
@@ -15,20 +29,21 @@ interface Token {
 	value: string;
 }
 
-enum CommandsEnum {
-	ECHO = 'echo',
-	TYPE = 'type',
-	PWD = 'pwd',
-	CD = 'cd',
-	EXIT = 'exit',
-}
-
 // Readline interface
 const rl = createInterface({
 	input: process.stdin,
 	output: process.stdout,
-});
+    completer: (line: string) => {      
+        if(commands.has(line)) return [line, line];
+        const completions = ['echo', 'exit', 'type', 'pwd', 'cd'];
+        const hits = completions.filter(c => c.startsWith(line)).map(c => c + ' ');
+                
+        // If command is not known ring a bell
+        if(hits.length === 0) process.stdout.write('\x07');        
 
+        return [hits, line];
+    }
+});
 
 // - Specific helpers - //
 const ESCAPABLE_IN_DOUBLE_QUOTES = ['"', '$', '\\', '`'];
@@ -251,13 +266,6 @@ function hadnleTypeCommand(command: string) {
 
 	notFoundCommand(command);
 }
-
-const commands = new Set<string>();
-commands.add(CommandsEnum.ECHO);
-commands.add(CommandsEnum.TYPE);
-commands.add(CommandsEnum.PWD);
-commands.add(CommandsEnum.CD);
-commands.add(CommandsEnum.EXIT);
 
 function ask(): void {
 	let currentWorkspaceDirectory = process.cwd();
